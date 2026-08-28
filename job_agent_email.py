@@ -1,5 +1,4 @@
 import smtplib
-import requests
 import json
 import logging
 import os
@@ -7,6 +6,7 @@ import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
+from curl_cffi import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -35,13 +35,6 @@ CRITERIA = {
     "excluded_companies": ["sii"]
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://justjoin.it/"
-}
-
 def load_seen_offers() -> Set[str]:
     try:
         with open(SEEN_OFFERS_FILE, "r", encoding="utf-8") as f:
@@ -58,14 +51,21 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://api.justjoin.it/v2/user-panel/offers?category=devops"
+        url = "https://api.justjoin.it/v2/user-panel/offers"
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Version": "2"
+        }
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
+            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 data = r.json().get("data", [])
                 results = []
                 for item in data:
                     title = item.get('title', '')
+                    category = item.get('marker_icon', '').lower()
+                    if "devops" not in category and "devops" not in title.lower():
+                        continue
                     skills = [s.get("name", "").lower() for s in item.get("skills", [])]
                     results.append({
                         "id": f"jjit_{item.get('id')}",
@@ -90,11 +90,13 @@ class NoFluffJobsFetcher:
         url = "https://nofluffjobs.com/api/search/posting"
         payload = {
             "rawSearch": "devops",
-            "common": {"category": ["devops"]}
+            "pageSize": 50,
+            "salaryCurrency": "PLN",
+            "salaryPeriod": "month"
         }
-        headers = {**HEADERS, "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
                 results = []
@@ -120,29 +122,13 @@ class NoFluffJobsFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/graphql"
-        query = """
-        query SearchJobs {
-          jobs(page: 1, perPage: 50, filters: { keyword: "devops" }) {
-            nodes {
-              id
-              title
-              canonicalUrl
-              remote
-              city
-              company { name }
-              technologies { name }
-            }
-          }
-        }
-        """
-        headers = {**HEADERS, "Content-Type": "application/json"}
+        url = "https://bulldogjob.pl/api/v1/jobs/search?page=1&perPage=50&keyword=devops"
         try:
-            r = requests.post(url, json={"query": query}, headers=headers, timeout=15)
+            r = requests.get(url, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
-                nodes = r.json().get("data", {}).get("jobs", {}).get("nodes", [])
+                jobs = r.json().get("data", [])
                 results = []
-                for item in nodes:
+                for item in jobs:
                     skills = [s.get("name", "").lower() for s in item.get("technologies", []) if s.get("name")]
                     results.append({
                         "id": f"bulldog_{item.get('id')}",
@@ -156,23 +142,6 @@ class BulldogjobFetcher:
                     })
                 return results
             else:
-                # Rezerwowy prosty endpoint REST gdyby GraphQL miał restrykcje
-                res_alt = requests.get("https://bulldogjob.pl/api/v1/jobs/search?keyword=devops", headers=HEADERS, timeout=10)
-                if res_alt.status_code == 200:
-                    jobs = res_alt.json().get("data", [])
-                    results = []
-                    for item in jobs:
-                        results.append({
-                            "id": f"bulldog_{item.get('id')}",
-                            "title": item.get('title', ''),
-                            "company": item.get('company', {}).get('name', ''),
-                            "url": item.get('canonicalUrl', ''),
-                            "workplace": "remote" if item.get("remote") else "hybrid",
-                            "city": item.get("city", ""),
-                            "source": "Bulldogjob",
-                            "skills": []
-                        })
-                    return results
                 logging.warning(f"Bulldogjob zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"Bulldogjob Error: {e}")
@@ -183,7 +152,7 @@ class LinkedInFetcher:
     def fetch() -> List[Dict]:
         url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Poland&start=0"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
+            r = requests.get(url, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
@@ -240,6 +209,10 @@ def is_matching(offer: Dict) -> bool:
 def send_email_digest(matched_offers: List[Dict]) -> None:
     if not matched_offers:
         logging.info("Brak nowych ofert do wysłania.")
+        return
+
+    if not SMTP_USER or not SMTP_PASSWORD:
+        logging.warning("Brak skonfigurowanych zmiennych SMTP_USER lub SMTP_PASSWORD. Mail nie zostanie wysłany.")
         return
 
     msg = MIMEMultipart("alternative")
