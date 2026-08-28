@@ -63,17 +63,19 @@ class JJITFetcher:
                 results = []
                 for item in data:
                     title = item.get('title', '')
-                    skills = [s.get("name", "").lower() for s in item.get("skills", [])]
-                    results.append({
-                        "id": f"jjit_{item.get('id')}",
-                        "title": title,
-                        "company": item.get('companyName', item.get('company_name', '')),
-                        "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
-                        "workplace": str(item.get('workplaceType', '')),
-                        "city": item.get('city', ''),
-                        "source": "JustJoin.it",
-                        "skills": skills
-                    })
+                    category = item.get('marker_icon', '').lower()
+                    if "devops" in category or "devops" in title.lower() or "cloud" in title.lower():
+                        skills = [s.get("name", "").lower() for s in item.get("skills", [])]
+                        results.append({
+                            "id": f"jjit_{item.get('id')}",
+                            "title": title,
+                            "company": item.get('companyName', item.get('company_name', '')),
+                            "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
+                            "workplace": str(item.get('workplaceType', '')),
+                            "city": item.get('city', ''),
+                            "source": "JustJoin.it",
+                            "skills": skills
+                        })
                 return results
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
@@ -83,7 +85,7 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        payload = {"rawSearch": "category=devops", "common": {"page": 1}}
+        payload = {"rawSearch": "devops", "common": {"page": 1}}
         headers = {**BASE_HEADERS, "Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Referer": "https://nofluffjobs.com/pl/devops"}
         try:
             r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
@@ -109,8 +111,38 @@ class NoFluffJobsFetcher:
 
 # --- PORTALE EUROPEJSKIE I GLOBALNE ---
 
+class RelocateMeFetcher:
+    """Relocate.me - RSS Feed for DevOps / Cloud with Relocation Package"""
+    @staticmethod
+    def fetch() -> List[Dict]:
+        url = "https://relocate.me/rss"
+        try:
+            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                results = []
+                for item in root.findall(".//item"):
+                    title = item.findtext("title", "")
+                    link = item.findtext("link", "")
+                    guid = item.findtext("guid", link)
+                    
+                    if "devops" in title.lower() or "cloud" in title.lower() or "sre" in title.lower():
+                        results.append({
+                            "id": f"relocate_{hash(guid)}",
+                            "title": title,
+                            "company": "EU Employer (Relocation Package)",
+                            "url": link,
+                            "workplace": "relocation package",
+                            "city": "Europe",
+                            "source": "Relocate.me (EU)",
+                            "skills": []
+                        })
+                return results
+        except Exception as e:
+            logging.error(f"Relocate.me Error: {e}")
+        return []
+
 class WeWorkRemotelyFetcher:
-    """WeWorkRemotely - DevOps & Sysadmin Category RSS"""
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss"
@@ -143,33 +175,6 @@ class WeWorkRemotelyFetcher:
                 return results
         except Exception as e:
             logging.error(f"WeWorkRemotely Error: {e}")
-        return []
-
-class RelocateMeFetcher:
-    """Relocate.me - Jobs with Relocation Package in Europe"""
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://relocate.me/api/v1/jobs?query=devops"
-        headers = {**BASE_HEADERS, "Accept": "application/json"}
-        try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-            if r.status_code == 200:
-                jobs = r.json().get("data", [])
-                results = []
-                for item in jobs:
-                    results.append({
-                        "id": f"relocate_{item.get('id')}",
-                        "title": item.get("title"),
-                        "company": item.get("company_name", "EU Employer"),
-                        "url": f"https://relocate.me{item.get('url')}",
-                        "workplace": "relocation package",
-                        "city": item.get("location", "Europe"),
-                        "source": "Relocate.me (EU)",
-                        "skills": []
-                    })
-                return results
-        except Exception as e:
-            logging.error(f"Relocate.me Error: {e}")
         return []
 
 class ArbeitnowFetcher:
@@ -315,8 +320,8 @@ def main():
     sources = [
         ("JustJoin.it", JJITFetcher),
         ("NoFluffJobs", NoFluffJobsFetcher),
-        ("WeWorkRemotely", WeWorkRemotelyFetcher),
         ("Relocate.me (EU)", RelocateMeFetcher),
+        ("WeWorkRemotely", WeWorkRemotelyFetcher),
         ("Arbeitnow (EU)", ArbeitnowFetcher),
         ("Remotive (EU/Global)", RemotiveFetcher),
         ("LinkedIn Europe", LinkedInFetcher),
