@@ -1,4 +1,4 @@
-name: Run Job Agent Email
+name: Daily Job Agent Email
 
 on:
   schedule:
