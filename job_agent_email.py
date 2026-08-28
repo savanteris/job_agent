@@ -21,7 +21,7 @@ SEEN_OFFERS_FILE = "seen_offers.json"
 
 # --- PROFIL: MID/SENIOR DEVOPS & CLOUD ENGINEER ---
 CRITERIA = {
-    # Kluczowy stos technologiczny
+    # Kluczowe technologie ze stosu
     "core_tech": ["aws", "terraform", "kubernetes", "k8s"],
     "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "gcp", "azure"],
     
@@ -62,20 +62,25 @@ class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://api.justjoin.it/v2/user-panel/offers"
+        headers = {**HEADERS, "Referer": "https://justjoin.it/", "Version": "2"}
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = requests.get(url, headers=headers, timeout=10)
             if r.status_code == 200:
                 data = r.json().get("data", [])
-                return [{
-                    "id": f"jjit_{item.get('id')}",
-                    "title": item.get('title'),
-                    "company": item.get('company_name'),
-                    "url": f"https://justjoin.it/offers/{item.get('id')}",
-                    "workplace": item.get('workplace_type'),
-                    "city": item.get('city'),
-                    "source": "JustJoin.it",
-                    "skills": [s.get("name", "").lower() for s in item.get("skills", [])]
-                } for item in data]
+                results = []
+                for item in data:
+                    skills = [s.get("name", "").lower() for s in item.get("skills", [])]
+                    results.append({
+                        "id": f"jjit_{item.get('id')}",
+                        "title": item.get('title'),
+                        "company": item.get('company_name'),
+                        "url": f"https://justjoin.it/offers/{item.get('id')}",
+                        "workplace": item.get('workplace_type', ''),
+                        "city": item.get('city', ''),
+                        "source": "JustJoin.it",
+                        "skills": skills
+                    })
+                return results
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
         return []
@@ -84,21 +89,30 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        payload = {"rawSearch": "devops cloud sre aws terraform kubernetes"}
+        headers = {
+            **HEADERS, 
+            "Referer": "https://nofluffjobs.com/pl",
+            "Content-Type": "application/json"
+        }
+        payload = {"category": ["devops", "architecture"]}
         try:
-            r = requests.post(url, json=payload, headers=HEADERS, timeout=10)
+            r = requests.post(url, json=payload, headers=headers, timeout=10)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
-                return [{
-                    "id": f"nfj_{item.get('id')}",
-                    "title": item.get('title'),
-                    "company": item.get('name'),
-                    "url": f"https://nofluffjobs.com/pl/job/{item.get('url')}",
-                    "workplace": "remote" if item.get("fullyRemote") else "hybrid",
-                    "city": item.get("location", {}).get("places", [{}])[0].get("city", ""),
-                    "source": "NoFluffJobs",
-                    "skills": [s.lower() for s in item.get("tiles", {}).get("values", [])]
-                } for item in postings]
+                results = []
+                for item in postings:
+                    tiles = [s.lower() for s in item.get("tiles", {}).get("values", [])]
+                    results.append({
+                        "id": f"nfj_{item.get('id')}",
+                        "title": item.get('title'),
+                        "company": item.get('name'),
+                        "url": f"https://nofluffjobs.com/pl/job/{item.get('url')}",
+                        "workplace": "remote" if item.get("fullyRemote") else "hybrid",
+                        "city": item.get("location", {}).get("places", [{}])[0].get("city", ""),
+                        "source": "NoFluffJobs",
+                        "skills": tiles
+                    })
+                return results
         except Exception as e:
             logging.error(f"NFJ Error: {e}")
         return []
@@ -128,14 +142,17 @@ class RemotiveFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50&roles=devops,cloud"
+        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=100"
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
                 for item in jobs:
-                    environment = [e.lower() for e in item.get("environment", [])]
+                    env = [e.lower() for e in item.get("environment", [])]
+                    skills = [s.get("name", "").lower() for s in item.get("technologies", [])]
+                    all_skills = env + skills
+                    
                     results.append({
                         "id": f"bulldog_{item.get('id')}",
                         "title": item.get('title'),
@@ -144,7 +161,7 @@ class BulldogjobFetcher:
                         "workplace": "remote" if item.get("remote") else "hybrid",
                         "city": item.get("city", ""),
                         "source": "Bulldogjob",
-                        "skills": environment
+                        "skills": all_skills
                     })
                 return results
         except Exception as e:
@@ -221,7 +238,6 @@ def is_matching(offer: Dict) -> bool:
     is_warsaw = any(c in city for c in CRITERIA["allowed_cities"])
     is_hybrid = "hybrid" in workplace or "hybryda" in workplace
 
-    # Zaznaczamy wyłącznie: Praca zdalna LUB Hybryda w Warszawie
     if is_remote:
         return True
     elif is_hybrid and is_warsaw:
@@ -268,17 +284,26 @@ def main():
     seen_offers = load_seen_offers()
     all_offers = []
     
-    all_offers.extend(JJITFetcher.fetch())
-    all_offers.extend(NoFluffJobsFetcher.fetch())
-    all_offers.extend(RemotiveFetcher.fetch())
-    all_offers.extend(BulldogjobFetcher.fetch())
-    all_offers.extend(LinkedInFetcher.fetch())
+    sources = [
+        ("JJIT", JJITFetcher),
+        ("NoFluffJobs", NoFluffJobsFetcher),
+        ("Remotive", RemotiveFetcher),
+        ("Bulldogjob", BulldogjobFetcher),
+        ("LinkedIn", LinkedInFetcher),
+    ]
+
+    for name, fetcher in sources:
+        fetched = fetcher.fetch()
+        logging.info(f"Pobrano {len(fetched)} ofert z serwisu: {name}")
+        all_offers.extend(fetched)
 
     new_matches = []
     for offer in all_offers:
         if offer["id"] not in seen_offers and is_matching(offer):
             new_matches.append(offer)
             seen_offers.add(offer["id"])
+
+    logging.info(f"Łącznie dopasowano {len(new_matches)} nowych ofert po filtracji.")
 
     if new_matches:
         send_email_digest(new_matches)
