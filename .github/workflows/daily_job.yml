@@ -1,36 +1,39 @@
-name: Run Daily Job Agent
+name: Daily Job Agent Digest
 
 on:
   schedule:
-    - cron: '0 9 * * *'
-  workflow_dispatch:
-
-# Dodane wymagane uprawnienia zapisu dla repozytorium
-permissions:
-  contents: write
+    # Uruchamia się codziennie o 8:00 UTC (10:00 czasu polskiego)
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Przycisk "Run workflow" do ręcznego testowania
 
 jobs:
-  build:
+  run-agent:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests curl_cffi
 
-      - name: Run script
+      - name: Run Job Agent script
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python job_agent_email.py
 
-      - name: Save seen offers state
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Auto-update seen offers"
+      - name: Commit and push seen_offers.json
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_offers.json || true
+          git commit -m "Update seen offers list" || true
+          git push || true
