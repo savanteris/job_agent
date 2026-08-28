@@ -3,12 +3,14 @@ import json
 import logging
 import os
 import re
+import asyncio
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
-from curl_cffi import requests
 import xml.etree.ElementTree as ET
+from playwright.async_api import async_playwright
+from curl_cffi import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -37,7 +39,6 @@ CRITERIA = {
 
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9,pl-PL;q=0.8,pl;q=0.7",
 }
 
 def load_seen_offers() -> Set[str]:
@@ -52,10 +53,8 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
         json.dump(list(seen_offers), f)
 
 def is_within_last_days(date_epoch_or_iso, days=MAX_DAYS_OLD) -> bool:
-    """Sprawdza czy data jest nowsza niż X dni."""
     if not date_epoch_or_iso:
-        return True # Akceptujemy oferty bez znacznika czasu, polegając na bazie seen_offers.json
-    
+        return True
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     try:
         if isinstance(date_epoch_or_iso, (int, float)):
@@ -68,135 +67,100 @@ def is_within_last_days(date_epoch_or_iso, days=MAX_DAYS_OLD) -> bool:
         pass
     return True
 
-# --- PORTALE POLSKIE ---
+# --- PLAYWRIGHT FETCHERS (DLA CLOUDFLARE) ---
 
-class JJITFetcher:
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://justjoin.it/api/offers"
-        headers = {
-            **BASE_HEADERS,
-            "Accept": "application/json",
-            "Referer": "https://justjoin.it/"
-        }
+async def fetch_jjit() -> List[Dict]:
+    results = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=BASE_HEADERS["User-Agent"])
+        page = await context.new_page()
         try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-            if r.status_code != 200:
-                url = "https://api.justjoin.it/v2/user-panel/offers"
-                r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-
-            if r.status_code == 200:
-                res_data = r.json()
-                data = res_data.get("data", res_data) if isinstance(res_data, dict) else res_data
-                
-                results = []
-                for item in data:
-                    title = item.get('title', '')
-                    category = str(item.get('marker_icon', item.get('category_id', ''))).lower()
-                    skills = [s.get("name", "").lower() for s in item.get("skills", [])]
+            # Przechodzimy bezpośrednio do kategorii devops
+            await page.goto("https://justjoin.it/all-locations/devops", wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(3000)
+            
+            offers = await page.query_selector_all("article")
+            for offer in offers:
+                try:
+                    title_elem = await offer.query_selector("h2")
+                    link_elem = await offer.query_selector("a")
+                    company_elem = await offer.query_selector("span")
                     
-                    if "devops" in category or "devops" in title.lower() or any("devops" in s for s in skills):
+                    if title_elem and link_elem:
+                        title = await title_elem.inner_text()
+                        href = await link_elem.get_attribute("href")
+                        company = await company_elem.inner_text() if company_elem else "JustJoin Employer"
+                        
+                        offer_id = href.split("/")[-1] if href else str(hash(title))
                         results.append({
-                            "id": f"jjit_{item.get('id')}",
-                            "title": title,
-                            "company": item.get('companyName', item.get('company_name', '')),
-                            "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
-                            "workplace": str(item.get('workplaceType', '')),
-                            "city": item.get('city', ''),
+                            "id": f"jjit_{offer_id}",
+                            "title": title.strip(),
+                            "company": company.strip(),
+                            "url": f"https://justjoin.it{href}" if href.startswith("/") else href,
+                            "workplace": "remote/hybrid",
+                            "city": "Polska/Remote",
                             "source": "JustJoin.it",
-                            "skills": skills,
-                            "published_at": item.get("publishedAt", item.get("published_at"))
-                        })
-                return results
-            else:
-                logging.warning(f"JJIT zwrócił kod statusu: {r.status_code}")
-        except Exception as e:
-            logging.error(f"JJIT Error: {e}")
-        return []
-
-class NoFluffJobsFetcher:
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://nofluffjobs.com/api/search/posting"
-        payload = {
-            "rawSearch": "category=devops",
-            "common": {"page": 1}
-        }
-        headers = {
-            **BASE_HEADERS,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://nofluffjobs.com/pl/devops"
-        }
-        try:
-            r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
-            if r.status_code == 200:
-                postings = r.json().get("postings", [])
-                results = []
-                for item in postings:
-                    tiles = [s.lower() for s in item.get("tiles", {}).get("values", [])]
-                    posted_ts = item.get("posted")
-                    posted_sec = posted_ts / 1000.0 if posted_ts else None
-                    results.append({
-                        "id": f"nfj_{item.get('id')}",
-                        "title": item.get('title'),
-                        "company": item.get('name'),
-                        "url": f"https://nofluffjobs.com/pl/job/{item.get('url')}",
-                        "workplace": "remote" if item.get("fullyRemote") else "hybrid",
-                        "city": item.get("location", {}).get("places", [{}])[0].get("city", ""),
-                        "source": "NoFluffJobs",
-                        "skills": tiles,
-                        "published_at": posted_sec
-                    })
-                return results
-            else:
-                logging.warning(f"NFJ zwrócił kod statusu: {r.status_code}")
-        except Exception as e:
-            logging.error(f"NFJ Error: {e}")
-        return []
-
-# --- PORTALE EUROPEJSKIE I GLOBALNE ---
-
-class RelocateMeFetcher:
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://relocate.me/search"
-        headers = {
-            **BASE_HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        }
-        try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-            if r.status_code == 200:
-                matches = re.findall(r'<a href="(/jobs/[^"]+)"[^>]*>\s*([^<]+)\s*</a>', r.text)
-                results = []
-                for link, title in matches:
-                    clean_title = title.strip()
-                    if clean_title and any(k in clean_title.lower() for k in ["devops", "cloud", "sre", "infrastructure", "engineer"]):
-                        results.append({
-                            "id": f"relocate_{hash(link)}",
-                            "title": clean_title,
-                            "company": "EU Employer (Relocation Package)",
-                            "url": f"https://relocate.me{link}" if not link.startswith("http") else link,
-                            "workplace": "relocation package",
-                            "city": "Europe",
-                            "source": "Relocate.me (EU)",
-                            "skills": [],
+                            "skills": ["devops"],
                             "published_at": None
                         })
-                return results
-            else:
-                logging.warning(f"Relocate.me zwrócił kod statusu: {r.status_code}")
+                except Exception:
+                    continue
         except Exception as e:
-            logging.error(f"Relocate.me Error: {e}")
-        return []
+            logging.error(f"JJIT Playwright Error: {e}")
+        finally:
+            await browser.close()
+    return results
+
+async def fetch_nfj() -> List[Dict]:
+    results = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=BASE_HEADERS["User-Agent"])
+        page = await context.new_page()
+        try:
+            await page.goto("https://nofluffjobs.com/pl/devops", wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(3000)
+            
+            cards = await page.query_selector_all("a.posting-list-item")
+            for card in cards:
+                try:
+                    title_elem = await card.query_selector("h3")
+                    company_elem = await card.query_selector("footer span, .posting-title__company")
+                    href = await card.get_attribute("href")
+                    
+                    if title_elem and href:
+                        title = await title_elem.inner_text()
+                        company = await company_elem.inner_text() if company_elem else "NoFluffJobs Employer"
+                        offer_id = href.split("/")[-1]
+                        
+                        results.append({
+                            "id": f"nfj_{offer_id}",
+                            "title": title.strip(),
+                            "company": company.strip(),
+                            "url": f"https://nofluffjobs.com{href}" if href.startswith("/") else href,
+                            "workplace": "remote/hybrid",
+                            "city": "Polska/Remote",
+                            "source": "NoFluffJobs",
+                            "skills": ["devops"],
+                            "published_at": None
+                        })
+                except Exception:
+                    continue
+        except Exception as e:
+            logging.error(f"NFJ Playwright Error: {e}")
+        finally:
+            await browser.close()
+    return results
+
+# --- OTWARTE REST API / RSS (BEZ CLOUDFLARE) ---
 
 class WeWorkRemotelyFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss"
         try:
-            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=BASE_HEADERS, timeout=15)
             if r.status_code == 200:
                 root = ET.fromstring(r.content)
                 results = []
@@ -204,7 +168,6 @@ class WeWorkRemotelyFetcher:
                     title = item.findtext("title", "")
                     link = item.findtext("link", "")
                     guid = item.findtext("guid", link)
-                    
                     company = "Remote Company"
                     if ":" in title:
                         parts = title.split(":", 1)
@@ -232,13 +195,12 @@ class ArbeitnowFetcher:
     def fetch() -> List[Dict]:
         url = "https://www.arbeitnow.com/api/job-board-api"
         try:
-            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=BASE_HEADERS, timeout=15)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
                 for item in jobs:
                     tags = [t.lower() for t in item.get("tags", [])]
-                    created_at = item.get("created_at")
                     results.append({
                         "id": f"arbeitnow_{item.get('slug')}",
                         "title": item.get("title"),
@@ -248,7 +210,7 @@ class ArbeitnowFetcher:
                         "city": item.get("location", "Europe"),
                         "source": "Arbeitnow (EU)",
                         "skills": tags,
-                        "published_at": created_at
+                        "published_at": item.get("created_at")
                     })
                 return results
         except Exception as e:
@@ -260,13 +222,12 @@ class RemotiveFetcher:
     def fetch() -> List[Dict]:
         url = "https://remotive.com/api/remote-jobs?category=devops"
         try:
-            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=BASE_HEADERS, timeout=15)
             if r.status_code == 200:
                 jobs = r.json().get("jobs", [])
                 results = []
                 for item in jobs:
                     tags = [t.lower() for t in item.get("tags", [])]
-                    pub_date = item.get("publication_date")
                     results.append({
                         "id": f"remotive_{item.get('id')}",
                         "title": item.get("title"),
@@ -276,43 +237,14 @@ class RemotiveFetcher:
                         "city": item.get("candidate_required_location", "Worldwide/EU"),
                         "source": "Remotive (EU/Global)",
                         "skills": tags,
-                        "published_at": pub_date
+                        "published_at": item.get("publication_date")
                     })
                 return results
         except Exception as e:
             logging.error(f"Remotive Error: {e}")
         return []
 
-class LinkedInFetcher:
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Europe&start=0"
-        headers = {**BASE_HEADERS, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
-        try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-            if r.status_code == 200:
-                matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
-                results = []
-                for url_match, title in matches[:20]:
-                    job_id_match = re.search(r'-(\d+)\?', url_match)
-                    job_id = job_id_match.group(1) if job_id_match else str(hash(url_match))
-                    results.append({
-                        "id": f"linkedin_eu_{job_id}",
-                        "title": title.strip(),
-                        "company": "LinkedIn EU",
-                        "url": url_match.split("?")[0],
-                        "workplace": "remote / relocate",
-                        "city": "Europe",
-                        "source": "LinkedIn Europe",
-                        "skills": [],
-                        "published_at": None
-                    })
-                return results
-        except Exception as e:
-            logging.error(f"LinkedIn Error: {e}")
-        return []
-
-# --- FILTRACJA I WYSYŁKA ---
+# --- FILTRACJA I EMAIL ---
 
 def is_matching(offer: Dict) -> bool:
     if not is_within_last_days(offer.get("published_at"), days=MAX_DAYS_OLD):
@@ -330,10 +262,7 @@ def is_matching(offer: Dict) -> bool:
         return False
 
     has_valid_role = any(role in title for role in CRITERIA["valid_roles"])
-    
-    score = 0
-    if has_valid_role:
-        score += 2
+    score = 2 if has_valid_role else 0
         
     for tech in CRITERIA["core_tech"]:
         if tech in full_text:
@@ -346,11 +275,11 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert (max 7 dni)"
+    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert"
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
 
-    html_content = f"<h2>Znalezione nowe oferty opublikowane w ciągu ostatnich 7 dni ({len(matched_offers)}):</h2><ul>"
+    html_content = f"<h2>Znalezione nowe oferty ({len(matched_offers)}):</h2><ul>"
     for o in matched_offers:
         html_content += f"""
         <li style="margin-bottom: 12px;">
@@ -371,24 +300,33 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
     except Exception as e:
         logging.error(f"Błąd podczas wysyłania maila: {e}")
 
-def main():
+async def main_async():
     seen_offers = load_seen_offers()
     all_offers = []
-    
-    sources = [
-        ("JustJoin.it", JJITFetcher),
-        ("NoFluffJobs", NoFluffJobsFetcher),
-        ("Relocate.me (EU)", RelocateMeFetcher),
-        ("WeWorkRemotely", WeWorkRemotelyFetcher),
-        ("Arbeitnow (EU)", ArbeitnowFetcher),
-        ("Remotive (EU/Global)", RemotiveFetcher),
-        ("LinkedIn Europe", LinkedInFetcher),
-    ]
 
-    for name, fetcher in sources:
-        fetched = fetcher.fetch()
-        logging.info(f"Pobrano {len(fetched)} ofert z serwisu: {name}")
-        all_offers.extend(fetched)
+    # Scraping przeglądarkowy (Cloudflare)
+    logging.info("Pobieranie ofert z JustJoin.it przez Playwright...")
+    jjit_offers = await fetch_jjit()
+    logging.info(f"Pobrano {len(jjit_offers)} ofert z JustJoin.it")
+    all_offers.extend(jjit_offers)
+
+    logging.info("Pobieranie ofert z NoFluffJobs przez Playwright...")
+    nfj_offers = await fetch_nfj()
+    logging.info(f"Pobrano {len(nfj_offers)} ofert z NoFluffJobs")
+    all_offers.extend(nfj_offers)
+
+    # Scraping API/RSS
+    wwr = WeWorkRemotelyFetcher.fetch()
+    logging.info(f"Pobrano {len(wwr)} ofert z WeWorkRemotely")
+    all_offers.extend(wwr)
+
+    arbeit = ArbeitnowFetcher.fetch()
+    logging.info(f"Pobrano {len(arbeit)} ofert z Arbeitnow (EU)")
+    all_offers.extend(arbeit)
+
+    remotive = RemotiveFetcher.fetch()
+    logging.info(f"Pobrano {len(remotive)} ofert z Remotive")
+    all_offers.extend(remotive)
 
     new_matches = []
     for offer in all_offers:
@@ -396,7 +334,7 @@ def main():
             new_matches.append(offer)
             seen_offers.add(offer["id"])
 
-    logging.info(f"Łącznie dopasowano {len(new_matches)} nowych ofert spełniających kryteria daty i technologii.")
+    logging.info(f"Łącznie dopasowano {len(new_matches)} nowych ofert spełniających kryteria.")
 
     if new_matches:
         send_email_digest(new_matches)
@@ -405,4 +343,4 @@ def main():
         logging.info("Brak nowych unikalnych ofert spełniających kryteria.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
