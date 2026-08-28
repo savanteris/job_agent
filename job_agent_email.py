@@ -39,7 +39,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "no-cache"
+    "Referer": "https://justjoin.it/"
 }
 
 def load_seen_offers() -> Set[str]:
@@ -53,13 +53,12 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
-# --- SKUTECZNE KOLEKTORY OFERT ---
+# --- KOLEKTORY OFERT ---
 
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        # Publiczny skonsolidowany endpoint wyszukiwania JustJoin.it
-        url = "https://api.justjoin.it/v2/user-panel/offers?category=devops&sortBy=published&sortOrder=desc&perPage=50"
+        url = "https://api.justjoin.it/v2/user-panel/offers?category=devops"
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
@@ -90,8 +89,8 @@ class NoFluffJobsFetcher:
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
         payload = {
-            "category": ["devops"],
-            "rawSearch": "devops"
+            "rawSearch": "devops",
+            "common": {"category": ["devops"]}
         }
         headers = {**HEADERS, "Content-Type": "application/json"}
         try:
@@ -121,15 +120,30 @@ class NoFluffJobsFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50&keyword=devops"
+        url = "https://bulldogjob.pl/api/v1/graphql"
+        query = """
+        query SearchJobs {
+          jobs(page: 1, perPage: 50, filters: { keyword: "devops" }) {
+            nodes {
+              id
+              title
+              canonicalUrl
+              remote
+              city
+              company { name }
+              technologies { name }
+            }
+          }
+        }
+        """
+        headers = {**HEADERS, "Content-Type": "application/json"}
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
+            r = requests.post(url, json={"query": query}, headers=headers, timeout=15)
             if r.status_code == 200:
-                jobs = r.json().get("data", [])
+                nodes = r.json().get("data", {}).get("jobs", {}).get("nodes", [])
                 results = []
-                for item in jobs:
-                    env = [e.lower() for e in item.get("environment", [])]
-                    skills = [s.get("name", "").lower() for s in item.get("technologies", [])]
+                for item in nodes:
+                    skills = [s.get("name", "").lower() for s in item.get("technologies", []) if s.get("name")]
                     results.append({
                         "id": f"bulldog_{item.get('id')}",
                         "title": item.get('title', ''),
@@ -138,10 +152,27 @@ class BulldogjobFetcher:
                         "workplace": "remote" if item.get("remote") else "hybrid",
                         "city": item.get("city", ""),
                         "source": "Bulldogjob",
-                        "skills": env + skills
+                        "skills": skills
                     })
                 return results
             else:
+                # Rezerwowy prosty endpoint REST gdyby GraphQL miał restrykcje
+                res_alt = requests.get("https://bulldogjob.pl/api/v1/jobs/search?keyword=devops", headers=HEADERS, timeout=10)
+                if res_alt.status_code == 200:
+                    jobs = res_alt.json().get("data", [])
+                    results = []
+                    for item in jobs:
+                        results.append({
+                            "id": f"bulldog_{item.get('id')}",
+                            "title": item.get('title', ''),
+                            "company": item.get('company', {}).get('name', ''),
+                            "url": item.get('canonicalUrl', ''),
+                            "workplace": "remote" if item.get("remote") else "hybrid",
+                            "city": item.get("city", ""),
+                            "source": "Bulldogjob",
+                            "skills": []
+                        })
+                    return results
                 logging.warning(f"Bulldogjob zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"Bulldogjob Error: {e}")
@@ -202,11 +233,7 @@ def is_matching(offer: Dict) -> bool:
         if tech in full_text:
             score += 1
 
-    # Wystarczy obecność roli + 1 technologii lub samo dopasowanie słów kluczowych
-    if score < 2:
-        return False
-
-    return True
+    return score >= 2
 
 # --- WYSYŁANIE E-MAILA ---
 
