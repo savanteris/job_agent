@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
 from curl_cffi import requests
+import xml.etree.ElementTree as ET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -32,10 +33,9 @@ CRITERIA = {
     "excluded_companies": ["sii"]
 }
 
-# Uniwersalne nagłówki imitujące nowoczesną przeglądarkę Chrome
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9,pl-PL;q=0.8,pl;q=0.7",
 }
 
 def load_seen_offers() -> Set[str]:
@@ -49,18 +49,13 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
-# --- KOLEKTORY OFERT ---
+# --- PORTALE POLSKIE ---
 
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://api.justjoin.it/v2/user-panel/offers"
-        headers = {
-            **BASE_HEADERS,
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://justjoin.it/",
-            "Version": "2"
-        }
+        headers = {**BASE_HEADERS, "Accept": "application/json, text/plain, */*", "Referer": "https://justjoin.it/", "Version": "2"}
         try:
             r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
@@ -80,8 +75,6 @@ class JJITFetcher:
                         "skills": skills
                     })
                 return results
-            else:
-                logging.warning(f"JJIT zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
         return []
@@ -90,18 +83,9 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        payload = {
-            "rawSearch": "category=devops",
-            "common": {"page": 1}
-        }
-        headers = {
-            **BASE_HEADERS,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://nofluffjobs.com/pl/devops"
-        }
+        payload = {"rawSearch": "category=devops", "common": {"page": 1}}
+        headers = {**BASE_HEADERS, "Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Referer": "https://nofluffjobs.com/pl/devops"}
         try:
-            # Wymagane zapytanie POST zamiast GET
             r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
@@ -119,69 +103,148 @@ class NoFluffJobsFetcher:
                         "skills": tiles
                     })
                 return results
-            else:
-                logging.warning(f"NFJ zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"NFJ Error: {e}")
         return []
 
-class BulldogjobFetcher:
+# --- PORTALE EUROPEJSKIE I GLOBALNE ---
+
+class WeWorkRemotelyFetcher:
+    """WeWorkRemotely - DevOps & Sysadmin Category RSS"""
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50"
-        headers = {
-            **BASE_HEADERS,
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://bulldogjob.pl/"
-        }
+        url = "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss"
+        try:
+            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                results = []
+                for item in root.findall(".//item"):
+                    title = item.findtext("title", "")
+                    link = item.findtext("link", "")
+                    guid = item.findtext("guid", link)
+                    
+                    company = "Remote Company"
+                    if ":" in title:
+                        parts = title.split(":", 1)
+                        company = parts[0].strip()
+                        title = parts[1].strip()
+
+                    results.append({
+                        "id": f"wwr_{hash(guid)}",
+                        "title": title,
+                        "company": company,
+                        "url": link,
+                        "workplace": "remote",
+                        "city": "Worldwide / EU",
+                        "source": "WeWorkRemotely",
+                        "skills": []
+                    })
+                return results
+        except Exception as e:
+            logging.error(f"WeWorkRemotely Error: {e}")
+        return []
+
+class RelocateMeFetcher:
+    """Relocate.me - Jobs with Relocation Package in Europe"""
+    @staticmethod
+    def fetch() -> List[Dict]:
+        url = "https://relocate.me/api/v1/jobs?query=devops"
+        headers = {**BASE_HEADERS, "Accept": "application/json"}
         try:
             r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
                 for item in jobs:
-                    skills = [s.get("name", "").lower() for s in item.get("technologies", []) if s.get("name")]
                     results.append({
-                        "id": f"bulldog_{item.get('id')}",
-                        "title": item.get('title', ''),
-                        "company": item.get('company', {}).get('name', ''),
-                        "url": item.get('canonicalUrl', ''),
-                        "workplace": "remote" if item.get("remote") else "hybrid",
-                        "city": item.get("city", ""),
-                        "source": "Bulldogjob",
-                        "skills": skills
+                        "id": f"relocate_{item.get('id')}",
+                        "title": item.get("title"),
+                        "company": item.get("company_name", "EU Employer"),
+                        "url": f"https://relocate.me{item.get('url')}",
+                        "workplace": "relocation package",
+                        "city": item.get("location", "Europe"),
+                        "source": "Relocate.me (EU)",
+                        "skills": []
                     })
                 return results
-            else:
-                logging.warning(f"Bulldogjob zwrócił status: {r.status_code}")
         except Exception as e:
-            logging.error(f"Bulldogjob Error: {e}")
+            logging.error(f"Relocate.me Error: {e}")
+        return []
+
+class ArbeitnowFetcher:
+    @staticmethod
+    def fetch() -> List[Dict]:
+        url = "https://www.arbeitnow.com/api/job-board-api"
+        try:
+            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            if r.status_code == 200:
+                jobs = r.json().get("data", [])
+                results = []
+                for item in jobs:
+                    tags = [t.lower() for t in item.get("tags", [])]
+                    results.append({
+                        "id": f"arbeitnow_{item.get('slug')}",
+                        "title": item.get("title"),
+                        "company": item.get("company_name"),
+                        "url": item.get("url"),
+                        "workplace": "remote" if item.get("remote") else "on-site",
+                        "city": item.get("location", "Europe"),
+                        "source": "Arbeitnow (EU)",
+                        "skills": tags
+                    })
+                return results
+        except Exception as e:
+            logging.error(f"Arbeitnow Error: {e}")
+        return []
+
+class RemotiveFetcher:
+    @staticmethod
+    def fetch() -> List[Dict]:
+        url = "https://remotive.com/api/remote-jobs?category=devops"
+        try:
+            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            if r.status_code == 200:
+                jobs = r.json().get("jobs", [])
+                results = []
+                for item in jobs:
+                    tags = [t.lower() for t in item.get("tags", [])]
+                    results.append({
+                        "id": f"remotive_{item.get('id')}",
+                        "title": item.get("title"),
+                        "company": item.get("company_name"),
+                        "url": item.get("url"),
+                        "workplace": "remote",
+                        "city": item.get("candidate_required_location", "Worldwide/EU"),
+                        "source": "Remotive (EU/Global)",
+                        "skills": tags
+                    })
+                return results
+        except Exception as e:
+            logging.error(f"Remotive Error: {e}")
         return []
 
 class LinkedInFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Poland&start=0"
-        headers = {
-            **BASE_HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        }
+        url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Europe&start=0"
+        headers = {**BASE_HEADERS, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
         try:
             r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
-                for url_match, title in matches[:15]:
+                for url_match, title in matches[:20]:
                     job_id_match = re.search(r'-(\d+)\?', url_match)
                     job_id = job_id_match.group(1) if job_id_match else str(hash(url_match))
                     results.append({
-                        "id": f"linkedin_{job_id}",
+                        "id": f"linkedin_eu_{job_id}",
                         "title": title.strip(),
-                        "company": "LinkedIn Offer",
+                        "company": "LinkedIn EU",
                         "url": url_match.split("?")[0],
-                        "workplace": "remote",
-                        "city": "Poland / Remote",
-                        "source": "LinkedIn Jobs",
+                        "workplace": "remote / relocate",
+                        "city": "Europe",
+                        "source": "LinkedIn Europe",
                         "skills": []
                     })
                 return results
@@ -220,7 +283,7 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert IT"
+    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert (PL & EU)"
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
 
@@ -252,8 +315,11 @@ def main():
     sources = [
         ("JustJoin.it", JJITFetcher),
         ("NoFluffJobs", NoFluffJobsFetcher),
-        ("Bulldogjob", BulldogjobFetcher),
-        ("LinkedIn", LinkedInFetcher),
+        ("WeWorkRemotely", WeWorkRemotelyFetcher),
+        ("Relocate.me (EU)", RelocateMeFetcher),
+        ("Arbeitnow (EU)", ArbeitnowFetcher),
+        ("Remotive (EU/Global)", RemotiveFetcher),
+        ("LinkedIn Europe", LinkedInFetcher),
     ]
 
     for name, fetcher in sources:
