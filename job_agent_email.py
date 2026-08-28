@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-from xml.etree import ElementTree as ET
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
@@ -20,11 +19,17 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "twój_app_password")
 
 SEEN_OFFERS_FILE = "seen_offers.json"
 
+# POLUZOWANE KRYTERIA WYSZUKIWANIA
 CRITERIA = {
-    "roles": ["devops", "sre", "cloud", "site reliability", "platform engineer"],
-    "keywords": ["aws", "devops", "terraform", "kubernetes", "github", "bitbucket"],
-    "workplace_types": ["remote", "hybrid"],
-    "allowed_cities": ["warszawa", "warsaw"],
+    "roles": [
+        "devops", "sre", "cloud", "site reliability", "platform", 
+        "infrastructure", "inżynier chmury", "system administrator", "sysadmin"
+    ],
+    "keywords": [
+        "aws", "terraform", "kubernetes", "k8s", "docker", 
+        "cloud", "azure", "gcp", "ansible", "ci/cd"
+    ],
+    "allowed_cities": ["warszawa", "warsaw", "poland", "polska"],
     "excluded_companies": ["sii"]
 }
 
@@ -113,7 +118,6 @@ class RemotiveFetcher:
         return []
 
 class BulldogjobFetcher:
-    """Kolektor ofert z serwisu Bulldogjob"""
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50&roles=devops,cloud"
@@ -139,44 +143,13 @@ class BulldogjobFetcher:
             logging.error(f"Bulldogjob Error: {e}")
         return []
 
-class PracujPlFetcher:
-    """Kolektor ofert z serwisu Pracuj.pl (REST API)"""
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://www.pracuj.pl/api/offers?kw=devops%20aws%20terraform&pn=1"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                offers = r.json().get("offers", [])
-                results = []
-                for item in offers:
-                    work_types = [wt.lower() for wt in item.get("workModels", [])]
-                    workplace = "remote" if "zdalna" in work_types else "hybrid"
-                    results.append({
-                        "id": f"pracuj_{item.get('groupId')}",
-                        "title": item.get('jobTitle'),
-                        "company": item.get('companyName'),
-                        "url": item.get('offerUrl'),
-                        "workplace": workplace,
-                        "city": item.get("displayWorkplace", ""),
-                        "source": "Pracuj.pl",
-                        "skills": [s.lower() for s in item.get("technologies", [])]
-                    })
-                return results
-        except Exception as e:
-            logging.error(f"Pracuj.pl Error: {e}")
-        return []
-
 class LinkedInFetcher:
-    """Kolektor ofert z publicznego kanału LinkedIn Jobs RSS"""
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://www.linkedin.com/jobs/search/?keywords=devops%20aws&location=Poland&f_WT=2&redirect=false"
-        # Używamy lekkiego parsera zapytań publicznych LinkedIn
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code == 200:
-                # Wyszukiwanie linków i tytułów z kodu źródłowego oferty
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
                 for url_match, title in matches[:15]:
@@ -185,7 +158,7 @@ class LinkedInFetcher:
                     results.append({
                         "id": f"linkedin_{job_id}",
                         "title": title.strip(),
-                        "company": "LinkedIn Company",
+                        "company": "LinkedIn Offer",
                         "url": url_match.split("?")[0],
                         "workplace": "remote",
                         "city": "Poland / Remote",
@@ -197,35 +170,36 @@ class LinkedInFetcher:
             logging.error(f"LinkedIn Error: {e}")
         return []
 
-# --- VALIDACJA OFERT ---
+# --- WALIDACJA OFERT ---
 
 def is_matching(offer: Dict) -> bool:
-    company = offer.get("company", "").lower()
+    company = str(offer.get("company", "")).lower()
     if any(ex in company for ex in CRITERIA["excluded_companies"]):
         return False
 
-    title = offer.get("title", "").lower()
+    title = str(offer.get("title", "")).lower()
     skills = " ".join(offer.get("skills", [])).lower()
     searchable_text = f"{title} {skills}"
 
-    # Rola
-    if not any(role in title for role in CRITERIA["roles"]):
+    # 1. Rola LUB kluczowe technologie w umiejętnościach
+    has_role = any(role in title for role in CRITERIA["roles"])
+    has_tech_in_skills = any(kw in skills for kw in ["aws", "terraform", "kubernetes", "k8s"])
+
+    if not (has_role or has_tech_in_skills):
         return False
 
-    # Słowa kluczowe (przynajmniej jedno musi się zgadzać)
+    # 2. Słowa kluczowe w opisie/tytule
     if not any(kw in searchable_text for kw in CRITERIA["keywords"]):
         return False
 
-    # Lokalizacja / Tryb
-    workplace = offer.get("workplace", "").lower()
+    # 3. Lokalizacja / Tryb (Remote, Warszawa lub Polska)
+    workplace = str(offer.get("workplace", "")).lower()
     city = str(offer.get("city", "")).lower()
 
-    if "remote" in workplace or "remote" in city or "zdalna" in workplace:
-        return True
-    elif "hybrid" in workplace or "hybryda" in workplace:
-        return any(c in city for c in CRITERIA["allowed_cities"])
-    
-    return False
+    is_remote = "remote" in workplace or "remote" in city or "zdalna" in workplace
+    is_allowed_location = any(c in city for c in CRITERIA["allowed_cities"]) or city == ""
+
+    return is_remote or is_allowed_location
 
 # --- WYSYŁANIE WIADOMOŚCI E-MAIL ---
 
@@ -266,12 +240,11 @@ def main():
     seen_offers = load_seen_offers()
     all_offers = []
     
-    # Pobieranie ze wszystkich źródeł
+    # Pobieranie ze sprawdzonych i stabilnych źródeł
     all_offers.extend(JJITFetcher.fetch())
     all_offers.extend(NoFluffJobsFetcher.fetch())
     all_offers.extend(RemotiveFetcher.fetch())
     all_offers.extend(BulldogjobFetcher.fetch())
-    all_offers.extend(PracujPlFetcher.fetch())
     all_offers.extend(LinkedInFetcher.fetch())
 
     new_matches = []
