@@ -76,21 +76,23 @@ class JJITFetcher:
         url = "https://justjoin.it/api/offers"
         headers = {
             **BASE_HEADERS,
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://justjoin.it/all-locations/devops",
-            "Version": "2"
+            "Accept": "application/json",
+            "Referer": "https://justjoin.it/"
         }
         try:
             r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            if r.status_code != 200:
+                url = "https://api.justjoin.it/v2/user-panel/offers"
+                r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+
             if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict):
-                    data = data.get("data", [])
+                res_data = r.json()
+                data = res_data.get("data", res_data) if isinstance(res_data, dict) else res_data
                 
                 results = []
                 for item in data:
                     title = item.get('title', '')
-                    category = str(item.get('categoryId', item.get('category_id', ''))).lower()
+                    category = str(item.get('marker_icon', item.get('category_id', ''))).lower()
                     skills = [s.get("name", "").lower() for s in item.get("skills", [])]
                     
                     if "devops" in category or "devops" in title.lower() or any("devops" in s for s in skills):
@@ -103,7 +105,7 @@ class JJITFetcher:
                             "city": item.get('city', ''),
                             "source": "JustJoin.it",
                             "skills": skills,
-                            "published_at": item.get("publishedAt")
+                            "published_at": item.get("publishedAt", item.get("published_at"))
                         })
                 return results
             else:
@@ -117,9 +119,8 @@ class NoFluffJobsFetcher:
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
         payload = {
-            "category": ["devops", "architecture", "sysadmin"],
-            "rawSearch": "devops",
-            "page": 1
+            "rawSearch": "category=devops",
+            "common": {"page": 1}
         }
         headers = {
             **BASE_HEADERS,
@@ -159,15 +160,15 @@ class NoFluffJobsFetcher:
 class RelocateMeFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://relocate.me/search?query=devops"
+        url = "https://relocate.me/search"
         headers = {
             **BASE_HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         try:
             r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
-                matches = re.findall(r'<a[^>]*href="(/jobs/[^"]+)"[^>]*>([^<]+)</a>', r.text)
+                matches = re.findall(r'<a href="(/jobs/[^"]+)"[^>]*>\s*([^<]+)\s*</a>', r.text)
                 results = []
                 for link, title in matches:
                     clean_title = title.strip()
@@ -175,8 +176,8 @@ class RelocateMeFetcher:
                         results.append({
                             "id": f"relocate_{hash(link)}",
                             "title": clean_title,
-                            "company": "EU Employer (Relocation)",
-                            "url": f"https://relocate.me{link}",
+                            "company": "EU Employer (Relocation Package)",
+                            "url": f"https://relocate.me{link}" if not link.startswith("http") else link,
                             "workplace": "relocation package",
                             "city": "Europe",
                             "source": "Relocate.me (EU)",
