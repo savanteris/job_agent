@@ -35,6 +35,12 @@ CRITERIA = {
     "excluded_companies": ["sii"]
 }
 
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
 def load_seen_offers() -> Set[str]:
     try:
         with open(SEEN_OFFERS_FILE, "r", encoding="utf-8") as f:
@@ -53,7 +59,8 @@ class JJITFetcher:
     def fetch() -> List[Dict]:
         url = "https://api.justjoin.it/v2/user-panel/offers"
         headers = {
-            "Accept": "application/json, text/plain, */*",
+            **DEFAULT_HEADERS,
+            "Referer": "https://justjoin.it/",
             "Version": "2"
         }
         try:
@@ -63,9 +70,6 @@ class JJITFetcher:
                 results = []
                 for item in data:
                     title = item.get('title', '')
-                    category = item.get('marker_icon', '').lower()
-                    if "devops" not in category and "devops" not in title.lower():
-                        continue
                     skills = [s.get("name", "").lower() for s in item.get("skills", [])]
                     results.append({
                         "id": f"jjit_{item.get('id')}",
@@ -89,12 +93,14 @@ class NoFluffJobsFetcher:
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
         payload = {
-            "rawSearch": "devops",
-            "pageSize": 50,
-            "salaryCurrency": "PLN",
-            "salaryPeriod": "month"
+            "rawSearch": "category=devops",
+            "common": {"page": 1}
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            **DEFAULT_HEADERS,
+            "Content-Type": "application/json",
+            "Referer": "https://nofluffjobs.com/pl/devops"
+        }
         try:
             r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
@@ -122,9 +128,13 @@ class NoFluffJobsFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs/search?page=1&perPage=50&keyword=devops"
+        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50"
+        headers = {
+            **DEFAULT_HEADERS,
+            "Referer": "https://bulldogjob.pl/"
+        }
         try:
-            r = requests.get(url, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
@@ -151,8 +161,9 @@ class LinkedInFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Poland&start=0"
+        headers = DEFAULT_HEADERS
         try:
-            r = requests.get(url, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
