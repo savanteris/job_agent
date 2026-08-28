@@ -21,28 +21,24 @@ SEEN_OFFERS_FILE = "seen_offers.json"
 
 # --- PROFIL: MID/SENIOR DEVOPS & CLOUD ENGINEER ---
 CRITERIA = {
-    # Kluczowe technologie ze stosu
     "core_tech": ["aws", "terraform", "kubernetes", "k8s"],
     "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "gcp", "azure"],
-    
-    # Dozwolone nazwy ról
     "valid_roles": [
         "devops", "cloud", "sre", "site reliability", "platform", 
         "infrastructure", "inżynier chmury", "system administrator", "sysadmin"
     ],
-    
-    # Odsiew śmieciowych ofert i niepasujących poziomów
     "blacklisted_terms": [
         "junior", "trainee", "staż", "intern", "helpdesk", "support", 
         "frontend", "react", "vue", "angular", "android", "ios", "qa", "tester", "php", ".net"
     ],
-    
     "allowed_cities": ["warszawa", "warsaw"],
     "excluded_companies": ["sii"]
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "pl,en-US;q=0.7,en;q=0.3"
 }
 
 def load_seen_offers() -> Set[str]:
@@ -56,24 +52,26 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
-# --- SCRAPERY / KOLEKTORY ---
+# --- SKUTECZNE I ODPOWORNIONE KOLEKTORY ---
 
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
+        # Zapytanie po wyszukiwaniu słów kluczowych devops/cloud
         url = "https://api.justjoin.it/v2/user-panel/offers"
-        headers = {**HEADERS, "Referer": "https://justjoin.it/", "Version": "2"}
+        headers = {**HEADERS, "Version": "2"}
         try:
-            r = requests.get(url, headers=headers, timeout=10)
+            r = requests.get(url, headers=headers, timeout=12)
             if r.status_code == 200:
                 data = r.json().get("data", [])
                 results = []
                 for item in data:
+                    title = item.get('title', '')
                     skills = [s.get("name", "").lower() for s in item.get("skills", [])]
                     results.append({
                         "id": f"jjit_{item.get('id')}",
-                        "title": item.get('title'),
-                        "company": item.get('company_name'),
+                        "title": title,
+                        "company": item.get('company_name', ''),
                         "url": f"https://justjoin.it/offers/{item.get('id')}",
                         "workplace": item.get('workplace_type', ''),
                         "city": item.get('city', ''),
@@ -89,14 +87,13 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        headers = {
-            **HEADERS, 
-            "Referer": "https://nofluffjobs.com/pl",
-            "Content-Type": "application/json"
+        headers = {**HEADERS, "Content-Type": "application/json"}
+        payload = {
+            "category": ["devops", "architecture"],
+            "criteriaSearch": {"city": ["warszawa"], "requirement": ["aws", "kubernetes", "terraform"]}
         }
-        payload = {"category": ["devops", "architecture"]}
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            r = requests.post(url, json=payload, headers=headers, timeout=12)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
                 results = []
@@ -117,51 +114,27 @@ class NoFluffJobsFetcher:
             logging.error(f"NFJ Error: {e}")
         return []
 
-class RemotiveFetcher:
-    @staticmethod
-    def fetch() -> List[Dict]:
-        url = "https://remotive.com/api/remote-jobs?category=devops"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                jobs = r.json().get("jobs", [])
-                return [{
-                    "id": f"remotive_{item.get('id')}",
-                    "title": item.get('title'),
-                    "company": item.get('company_name'),
-                    "url": item.get('url'),
-                    "workplace": "remote",
-                    "city": "Global Remote",
-                    "source": "Remotive (Global)",
-                    "skills": [s.lower() for s in item.get("tags", [])]
-                } for item in jobs]
-        except Exception as e:
-            logging.error(f"Remotive Error: {e}")
-        return []
-
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=100"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = requests.get(url, headers=HEADERS, timeout=12)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
                 for item in jobs:
                     env = [e.lower() for e in item.get("environment", [])]
                     skills = [s.get("name", "").lower() for s in item.get("technologies", [])]
-                    all_skills = env + skills
-                    
                     results.append({
                         "id": f"bulldog_{item.get('id')}",
-                        "title": item.get('title'),
-                        "company": item.get('company', {}).get('name'),
-                        "url": item.get('canonicalUrl'),
+                        "title": item.get('title', ''),
+                        "company": item.get('company', {}).get('name', ''),
+                        "url": item.get('canonicalUrl', ''),
                         "workplace": "remote" if item.get("remote") else "hybrid",
                         "city": item.get("city", ""),
                         "source": "Bulldogjob",
-                        "skills": all_skills
+                        "skills": env + skills
                     })
                 return results
         except Exception as e:
@@ -173,11 +146,11 @@ class LinkedInFetcher:
     def fetch() -> List[Dict]:
         url = "https://www.linkedin.com/jobs/search/?keywords=devops%20aws&location=Poland&f_WT=2&redirect=false"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = requests.get(url, headers=HEADERS, timeout=12)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
-                for url_match, title in matches[:15]:
+                for url_match, title in matches[:20]:
                     job_id_match = re.search(r'-(\d+)\?', url_match)
                     job_id = job_id_match.group(1) if job_id_match else str(hash(url_match))
                     results.append({
@@ -206,14 +179,11 @@ def is_matching(offer: Dict) -> bool:
     skills = " ".join(offer.get("skills", [])).lower()
     full_text = f"{title} {skills}"
 
-    # 1. Twardy odsiew - czarna lista (Junior, Support, Frontend itp.)
     if any(black in full_text for black in CRITERIA["blacklisted_terms"]):
         return False
 
-    # 2. Sprawdzenie roli
     has_valid_role = any(role in title for role in CRITERIA["valid_roles"])
     
-    # 3. System punktacyjny
     score = 0
     if has_valid_role:
         score += 3
@@ -226,11 +196,9 @@ def is_matching(offer: Dict) -> bool:
         if tech in full_text:
             score += 1
 
-    # Wymagany próg minimum 5 punktów
-    if score < 5:
+    if score < 4:
         return False
 
-    # 4. ŚCISŁA FILTRACJA LOKALIZACJI I TRYBU (Zdalnie LUB Hybryda w Warszawie)
     workplace = str(offer.get("workplace", "")).lower()
     city = str(offer.get("city", "")).lower()
 
@@ -238,14 +206,9 @@ def is_matching(offer: Dict) -> bool:
     is_warsaw = any(c in city for c in CRITERIA["allowed_cities"])
     is_hybrid = "hybrid" in workplace or "hybryda" in workplace
 
-    if is_remote:
-        return True
-    elif is_hybrid and is_warsaw:
-        return True
-    
-    return False
+    return is_remote or (is_hybrid and is_warsaw)
 
-# --- WYSYŁANIE WIADOMOŚCI E-MAIL ---
+# --- WYSYŁANIE E-MAILA ---
 
 def send_email_digest(matched_offers: List[Dict]) -> None:
     if not matched_offers:
@@ -257,7 +220,7 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
 
-    html_content = f"<h2>Znalezione nowe oferty dla Ciebie ({len(matched_offers)}):</h2><ul>"
+    html_content = f"<h2>Znalezione nowe oferty ({len(matched_offers)}):</h2><ul>"
     for o in matched_offers:
         html_content += f"""
         <li style="margin-bottom: 12px;">
@@ -287,7 +250,6 @@ def main():
     sources = [
         ("JJIT", JJITFetcher),
         ("NoFluffJobs", NoFluffJobsFetcher),
-        ("Remotive", RemotiveFetcher),
         ("Bulldogjob", BulldogjobFetcher),
         ("LinkedIn", LinkedInFetcher),
     ]
