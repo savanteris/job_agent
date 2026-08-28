@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
@@ -18,6 +19,7 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 
 SEEN_OFFERS_FILE = "seen_offers.json"
+MAX_DAYS_OLD = 7
 
 CRITERIA = {
     "core_tech": ["aws", "terraform", "kubernetes", "k8s", "azure", "gcp", "cloud"],
@@ -49,6 +51,24 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
+def is_within_last_days(date_epoch_or_iso, days=MAX_DAYS_OLD) -> bool:
+    """Sprawdza czy data jest nowsza niż X dni."""
+    if not date_epoch_or_iso:
+        return True # Jeśli brak daty w API, akceptujemy (opieramy się na seen_offers.json)
+    
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        if isinstance(date_epoch_or_iso, (int, float)):
+            dt = datetime.fromtimestamp(date_epoch_or_iso, tz=timezone.utc)
+            return dt >= cutoff
+        elif isinstance(date_epoch_or_iso, str):
+            # Proste dopasowanie ISO/RFC stringów
+            dt = datetime.fromisoformat(date_epoch_or_iso.replace("Z", "+00:00"))
+            return dt >= cutoff
+    except Exception:
+        pass
+    return True
+
 # --- PORTALE POLSKIE ---
 
 class JJITFetcher:
@@ -63,19 +83,18 @@ class JJITFetcher:
                 results = []
                 for item in data:
                     title = item.get('title', '')
-                    category = item.get('marker_icon', '').lower()
-                    if "devops" in category or "devops" in title.lower() or "cloud" in title.lower():
-                        skills = [s.get("name", "").lower() for s in item.get("skills", [])]
-                        results.append({
-                            "id": f"jjit_{item.get('id')}",
-                            "title": title,
-                            "company": item.get('companyName', item.get('company_name', '')),
-                            "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
-                            "workplace": str(item.get('workplaceType', '')),
-                            "city": item.get('city', ''),
-                            "source": "JustJoin.it",
-                            "skills": skills
-                        })
+                    skills = [s.get("name", "").lower() for s in item.get("skills", [])]
+                    results.append({
+                        "id": f"jjit_{item.get('id')}",
+                        "title": title,
+                        "company": item.get('companyName', item.get('company_name', '')),
+                        "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
+                        "workplace": str(item.get('workplaceType', '')),
+                        "city": item.get('city', ''),
+                        "source": "JustJoin.it",
+                        "skills": skills,
+                        "published_at": None
+                    })
                 return results
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
@@ -85,7 +104,7 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        payload = {"rawSearch": "devops", "common": {"page": 1}}
+        payload = {"criteriaSearch": {"category": ["devops"]}, "page": 1}
         headers = {**BASE_HEADERS, "Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Referer": "https://nofluffjobs.com/pl/devops"}
         try:
             r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
@@ -94,6 +113,8 @@ class NoFluffJobsFetcher:
                 results = []
                 for item in postings:
                     tiles = [s.lower() for s in item.get("tiles", {}).get("values", [])]
+                    posted_ts = item.get("posted") # NFJ podaje timestamp w ms
+                    posted_sec = posted_ts / 1000.0 if posted_ts else None
                     results.append({
                         "id": f"nfj_{item.get('id')}",
                         "title": item.get('title'),
@@ -102,7 +123,8 @@ class NoFluffJobsFetcher:
                         "workplace": "remote" if item.get("fullyRemote") else "hybrid",
                         "city": item.get("location", {}).get("places", [{}])[0].get("city", ""),
                         "source": "NoFluffJobs",
-                        "skills": tiles
+                        "skills": tiles,
+                        "published_at": posted_sec
                     })
                 return results
         except Exception as e:
@@ -112,30 +134,27 @@ class NoFluffJobsFetcher:
 # --- PORTALE EUROPEJSKIE I GLOBALNE ---
 
 class RelocateMeFetcher:
-    """Relocate.me - RSS Feed for DevOps / Cloud with Relocation Package"""
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://relocate.me/rss"
+        url = "https://relocate.me/search"
+        headers = {**BASE_HEADERS, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
         try:
-            r = requests.get(url, headers=BASE_HEADERS, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
-                root = ET.fromstring(r.content)
+                matches = re.findall(r'<a class="job-card__title[^"]*" href="([^"]+)">([^<]+)</a>', r.text)
                 results = []
-                for item in root.findall(".//item"):
-                    title = item.findtext("title", "")
-                    link = item.findtext("link", "")
-                    guid = item.findtext("guid", link)
-                    
-                    if "devops" in title.lower() or "cloud" in title.lower() or "sre" in title.lower():
+                for link, title in matches:
+                    if any(k in title.lower() for k in ["devops", "cloud", "sre", "infrastructure"]):
                         results.append({
-                            "id": f"relocate_{hash(guid)}",
-                            "title": title,
-                            "company": "EU Employer (Relocation Package)",
-                            "url": link,
+                            "id": f"relocate_{hash(link)}",
+                            "title": title.strip(),
+                            "company": "EU Employer (Relocation)",
+                            "url": f"https://relocate.me{link}" if not link.startswith("http") else link,
                             "workplace": "relocation package",
                             "city": "Europe",
                             "source": "Relocate.me (EU)",
-                            "skills": []
+                            "skills": [],
+                            "published_at": None
                         })
                 return results
         except Exception as e:
@@ -155,6 +174,7 @@ class WeWorkRemotelyFetcher:
                     title = item.findtext("title", "")
                     link = item.findtext("link", "")
                     guid = item.findtext("guid", link)
+                    pub_date = item.findtext("pubDate", "")
                     
                     company = "Remote Company"
                     if ":" in title:
@@ -170,7 +190,8 @@ class WeWorkRemotelyFetcher:
                         "workplace": "remote",
                         "city": "Worldwide / EU",
                         "source": "WeWorkRemotely",
-                        "skills": []
+                        "skills": [],
+                        "published_at": None
                     })
                 return results
         except Exception as e:
@@ -188,6 +209,7 @@ class ArbeitnowFetcher:
                 results = []
                 for item in jobs:
                     tags = [t.lower() for t in item.get("tags", [])]
+                    created_at = item.get("created_at") # Timestamp unix
                     results.append({
                         "id": f"arbeitnow_{item.get('slug')}",
                         "title": item.get("title"),
@@ -196,7 +218,8 @@ class ArbeitnowFetcher:
                         "workplace": "remote" if item.get("remote") else "on-site",
                         "city": item.get("location", "Europe"),
                         "source": "Arbeitnow (EU)",
-                        "skills": tags
+                        "skills": tags,
+                        "published_at": created_at
                     })
                 return results
         except Exception as e:
@@ -214,6 +237,7 @@ class RemotiveFetcher:
                 results = []
                 for item in jobs:
                     tags = [t.lower() for t in item.get("tags", [])]
+                    pub_date = item.get("publication_date") # ISO format
                     results.append({
                         "id": f"remotive_{item.get('id')}",
                         "title": item.get("title"),
@@ -222,7 +246,8 @@ class RemotiveFetcher:
                         "workplace": "remote",
                         "city": item.get("candidate_required_location", "Worldwide/EU"),
                         "source": "Remotive (EU/Global)",
-                        "skills": tags
+                        "skills": tags,
+                        "published_at": pub_date
                     })
                 return results
         except Exception as e:
@@ -250,7 +275,8 @@ class LinkedInFetcher:
                         "workplace": "remote / relocate",
                         "city": "Europe",
                         "source": "LinkedIn Europe",
-                        "skills": []
+                        "skills": [],
+                        "published_at": None
                     })
                 return results
         except Exception as e:
@@ -260,6 +286,11 @@ class LinkedInFetcher:
 # --- FILTRACJA I WYSYŁKA ---
 
 def is_matching(offer: Dict) -> bool:
+    # 1. Sprawdzenie daty publikacji (max 7 dni)
+    if not is_within_last_days(offer.get("published_at"), days=MAX_DAYS_OLD):
+        return False
+
+    # 2. Sprawdzenie wykluczonych firm
     company = str(offer.get("company", "")).lower()
     if any(ex in company for ex in CRITERIA["excluded_companies"]):
         return False
@@ -268,9 +299,11 @@ def is_matching(offer: Dict) -> bool:
     skills = " ".join(offer.get("skills", [])).lower()
     full_text = f"{title} {skills}"
 
+    # 3. Sprawdzenie fraz zakazanych
     if any(black in full_text for black in CRITERIA["blacklisted_terms"]):
         return False
 
+    # 4. Punktacja roli i technologii
     has_valid_role = any(role in title for role in CRITERIA["valid_roles"])
     
     score = 0
@@ -288,11 +321,11 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert (PL & EU)"
+    msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert (max 7 dni)"
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
 
-    html_content = f"<h2>Znalezione nowe oferty ({len(matched_offers)}):</h2><ul>"
+    html_content = f"<h2>Znalezione nowe oferty opublikowane w ciągu ostatnich 7 dni ({len(matched_offers)}):</h2><ul>"
     for o in matched_offers:
         html_content += f"""
         <li style="margin-bottom: 12px;">
@@ -338,7 +371,7 @@ def main():
             new_matches.append(offer)
             seen_offers.add(offer["id"])
 
-    logging.info(f"Łącznie dopasowano {len(new_matches)} nowych ofert po filtracji.")
+    logging.info(f"Łącznie dopasowano {len(new_matches)} nowych ofert spełniających kryteria daty i technologii.")
 
     if new_matches:
         send_email_digest(new_matches)
