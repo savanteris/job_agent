@@ -7,10 +7,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
 from curl_cffi import requests
+import xml.etree.ElementTree as ET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# --- KONFIGURACJA MAILOWO-SYSTEMOWA ---
 EMAIL_TO = "savanteris@wp.pl"
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
@@ -19,7 +19,6 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 
 SEEN_OFFERS_FILE = "seen_offers.json"
 
-# --- PROFIL: MID/SENIOR DEVOPS & CLOUD ENGINEER ---
 CRITERIA = {
     "core_tech": ["aws", "terraform", "kubernetes", "k8s", "azure", "gcp", "cloud"],
     "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "linux"],
@@ -31,14 +30,12 @@ CRITERIA = {
         "junior", "trainee", "staż", "intern", "helpdesk", "support", 
         "frontend", "react", "vue", "angular", "android", "ios", "qa", "tester", "php"
     ],
-    "allowed_cities": ["warszawa", "warsaw", "poland", "polska"],
     "excluded_companies": ["sii"]
 }
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 }
 
 def load_seen_offers() -> Set[str]:
@@ -52,38 +49,36 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
-# --- KOLEKTORY OFERT ---
+# --- KOLEKTORY DZIAŁAJĄCE NA GITHUB ACTIONS ---
 
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://api.justjoin.it/v2/user-panel/offers"
-        headers = {
-            **DEFAULT_HEADERS,
-            "Referer": "https://justjoin.it/",
-            "Version": "2"
-        }
+        # Publiczny RSS feed z JustJoin.it bypassuje zabezpieczenia Cloudflare
+        url = "https://justjoin.it/feed.xml"
         try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=DEFAULT_HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
-                data = r.json().get("data", [])
+                root = ET.fromstring(r.content)
                 results = []
-                for item in data:
-                    title = item.get('title', '')
-                    skills = [s.get("name", "").lower() for s in item.get("skills", [])]
+                for item in root.findall(".//item"):
+                    title = item.findtext("title", "")
+                    link = item.findtext("link", "")
+                    guid = item.findtext("guid", link)
+                    
                     results.append({
-                        "id": f"jjit_{item.get('id')}",
+                        "id": f"jjit_{guid}",
                         "title": title,
-                        "company": item.get('companyName', item.get('company_name', '')),
-                        "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
-                        "workplace": str(item.get('workplaceType', '')),
-                        "city": item.get('city', ''),
+                        "company": "JustJoin Offer",
+                        "url": link,
+                        "workplace": "remote / hybrid",
+                        "city": "Polska",
                         "source": "JustJoin.it",
-                        "skills": skills
+                        "skills": []
                     })
                 return results
             else:
-                logging.warning(f"JJIT zwrócił status: {r.status_code}")
+                logging.warning(f"JJIT RSS zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
         return []
@@ -91,18 +86,14 @@ class JJITFetcher:
 class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://nofluffjobs.com/api/search/posting"
-        payload = {
-            "rawSearch": "category=devops",
-            "common": {"page": 1}
-        }
+        # Widget / Open API endpoint
+        url = "https://nofluffjobs.com/api/search/posting?rawSearch=category%3Ddevops"
         headers = {
             **DEFAULT_HEADERS,
-            "Content-Type": "application/json",
-            "Referer": "https://nofluffjobs.com/pl/devops"
+            "Accept": "application/json"
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
                 results = []
@@ -128,27 +119,24 @@ class NoFluffJobsFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50"
-        headers = {
-            **DEFAULT_HEADERS,
-            "Referer": "https://bulldogjob.pl/"
-        }
+        url = "https://bulldogjob.pl/feed/news.xml"
         try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=DEFAULT_HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
-                jobs = r.json().get("data", [])
+                root = ET.fromstring(r.content)
                 results = []
-                for item in jobs:
-                    skills = [s.get("name", "").lower() for s in item.get("technologies", []) if s.get("name")]
+                for item in root.findall(".//item"):
+                    title = item.findtext("title", "")
+                    link = item.findtext("link", "")
                     results.append({
-                        "id": f"bulldog_{item.get('id')}",
-                        "title": item.get('title', ''),
-                        "company": item.get('company', {}).get('name', ''),
-                        "url": item.get('canonicalUrl', ''),
-                        "workplace": "remote" if item.get("remote") else "hybrid",
-                        "city": item.get("city", ""),
+                        "id": f"bulldog_{hash(link)}",
+                        "title": title,
+                        "company": "Bulldogjob",
+                        "url": link,
+                        "workplace": "remote / hybrid",
+                        "city": "Polska",
                         "source": "Bulldogjob",
-                        "skills": skills
+                        "skills": []
                     })
                 return results
             else:
@@ -161,9 +149,8 @@ class LinkedInFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Poland&start=0"
-        headers = DEFAULT_HEADERS
         try:
-            r = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            r = requests.get(url, headers=DEFAULT_HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
@@ -185,7 +172,7 @@ class LinkedInFetcher:
             logging.error(f"LinkedIn Error: {e}")
         return []
 
-# --- WERYFIKACJA I FILTRACJA OFERT ---
+# --- FILTRACJA I WYSYŁKA ---
 
 def is_matching(offer: Dict) -> bool:
     company = str(offer.get("company", "")).lower()
@@ -209,21 +196,10 @@ def is_matching(offer: Dict) -> bool:
         if tech in full_text:
             score += 1
 
-    for tech in CRITERIA["supporting_tech"]:
-        if tech in full_text:
-            score += 1
-
     return score >= 2
 
-# --- WYSYŁANIE E-MAILA ---
-
 def send_email_digest(matched_offers: List[Dict]) -> None:
-    if not matched_offers:
-        logging.info("Brak nowych ofert do wysłania.")
-        return
-
-    if not SMTP_USER or not SMTP_PASSWORD:
-        logging.warning("Brak skonfigurowanych zmiennych SMTP_USER lub SMTP_PASSWORD. Mail nie zostanie wysłany.")
+    if not matched_offers or not SMTP_USER or not SMTP_PASSWORD:
         return
 
     msg = MIMEMultipart("alternative")
@@ -251,8 +227,6 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
         logging.info(f"E-mail z ofertami pomyślnie wysłany na {EMAIL_TO}")
     except Exception as e:
         logging.error(f"Błąd podczas wysyłania maila: {e}")
-
-# --- MAIN ---
 
 def main():
     seen_offers = load_seen_offers()
