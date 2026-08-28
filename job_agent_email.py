@@ -16,7 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 EMAIL_TO = "savanteris@wp.pl"
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+smtp_port_env = os.getenv("SMTP_PORT", "").strip()
+SMTP_PORT = int(smtp_port_env) if smtp_port_env else 587
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 
