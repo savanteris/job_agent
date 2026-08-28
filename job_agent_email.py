@@ -10,17 +10,11 @@ from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Set
 import xml.etree.ElementTree as ET
 from playwright.async_api import async_playwright
-from curl_cffi import requests
+import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 EMAIL_TO = "savanteris@wp.pl"
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-smtp_port_env = os.getenv("SMTP_PORT", "").strip()
-SMTP_PORT = int(smtp_port_env) if smtp_port_env else 587
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-
 SEEN_OFFERS_FILE = "seen_offers.json"
 MAX_DAYS_OLD = 7
 
@@ -74,30 +68,41 @@ async def fetch_jjit() -> List[Dict]:
     results = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=BASE_HEADERS["User-Agent"])
+        context = await browser.new_context(
+            user_agent=BASE_HEADERS["User-Agent"],
+            viewport={"width": 1280, "height": 800}
+        )
         page = await context.new_page()
         try:
-            # Przechodzimy bezpośrednio do kategorii devops
-            await page.goto("https://justjoin.it/all-locations/devops", wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(3000)
+            await page.goto("https://justjoin.it/job-offers/devops", wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(4000)
             
-            offers = await page.query_selector_all("article")
-            for offer in offers:
+            try:
+                cookie_btn = await page.query_selector("#cookiescript_accept")
+                if cookie_btn:
+                    await cookie_btn.click()
+            except Exception:
+                pass
+
+            links = await page.query_selector_all('a[href*="/offers/"]')
+            seen_hrefs = set()
+
+            for link in links:
                 try:
-                    title_elem = await offer.query_selector("h2")
-                    link_elem = await offer.query_selector("a")
-                    company_elem = await offer.query_selector("span")
-                    
-                    if title_elem and link_elem:
+                    href = await link.get_attribute("href")
+                    if not href or href in seen_hrefs:
+                        continue
+                    seen_hrefs.add(href)
+
+                    title_elem = await link.query_selector("h2, h3, [class*='title']")
+                    if title_elem:
                         title = await title_elem.inner_text()
-                        href = await link_elem.get_attribute("href")
-                        company = await company_elem.inner_text() if company_elem else "JustJoin Employer"
+                        offer_id = href.split("/")[-1]
                         
-                        offer_id = href.split("/")[-1] if href else str(hash(title))
                         results.append({
                             "id": f"jjit_{offer_id}",
                             "title": title.strip(),
-                            "company": company.strip(),
+                            "company": "JustJoin Employer",
                             "url": f"https://justjoin.it{href}" if href.startswith("/") else href,
                             "workplace": "remote/hybrid",
                             "city": "Polska/Remote",
@@ -154,7 +159,7 @@ async def fetch_nfj() -> List[Dict]:
             await browser.close()
     return results
 
-# --- OTWARTE REST API / RSS (BEZ CLOUDFLARE) ---
+# --- OTWARTE REST API / RSS ---
 
 class WeWorkRemotelyFetcher:
     @staticmethod
@@ -272,12 +277,22 @@ def is_matching(offer: Dict) -> bool:
     return score >= 2
 
 def send_email_digest(matched_offers: List[Dict]) -> None:
-    if not matched_offers or not SMTP_USER or not SMTP_PASSWORD:
+    if not matched_offers:
+        return
+
+    host = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
+    port_val = os.getenv("SMTP_PORT", "587").strip()
+    port = int(port_val) if port_val.isdigit() else 587
+    user = os.getenv("SMTP_USER", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "").strip()
+
+    if not user or not password:
+        logging.error("Brak danych SMTP_USER lub SMTP_PASSWORD w Secrets!")
         return
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"🚀 Job Agent: Znaleziono {len(matched_offers)} nowych ofert"
-    msg["From"] = SMTP_USER
+    msg["From"] = user
     msg["To"] = EMAIL_TO
 
     html_content = f"<h2>Znalezione nowe oferty ({len(matched_offers)}):</h2><ul>"
@@ -293,10 +308,17 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, EMAIL_TO, msg.as_string())
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=15) as server:
+                server.login(user, password)
+                server.sendmail(user, EMAIL_TO, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(user, EMAIL_TO, msg.as_string())
+
         logging.info(f"E-mail z ofertami pomyślnie wysłany na {EMAIL_TO}")
     except Exception as e:
         logging.error(f"Błąd podczas wysyłania maila: {e}")
@@ -305,7 +327,6 @@ async def main_async():
     seen_offers = load_seen_offers()
     all_offers = []
 
-    # Scraping przeglądarkowy (Cloudflare)
     logging.info("Pobieranie ofert z JustJoin.it przez Playwright...")
     jjit_offers = await fetch_jjit()
     logging.info(f"Pobrano {len(jjit_offers)} ofert z JustJoin.it")
@@ -316,7 +337,6 @@ async def main_async():
     logging.info(f"Pobrano {len(nfj_offers)} ofert z NoFluffJobs")
     all_offers.extend(nfj_offers)
 
-    # Scraping API/RSS
     wwr = WeWorkRemotelyFetcher.fetch()
     logging.info(f"Pobrano {len(wwr)} ofert z WeWorkRemotely")
     all_offers.extend(wwr)
