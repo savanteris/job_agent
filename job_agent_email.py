@@ -14,31 +14,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 EMAIL_TO = "savanteris@wp.pl"
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER", "twój_mail_nadawcy@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "twój_app_password")
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 
 SEEN_OFFERS_FILE = "seen_offers.json"
 
 # --- PROFIL: MID/SENIOR DEVOPS & CLOUD ENGINEER ---
 CRITERIA = {
-    "core_tech": ["aws", "terraform", "kubernetes", "k8s"],
-    "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "gcp", "azure"],
+    "core_tech": ["aws", "terraform", "kubernetes", "k8s", "azure", "gcp", "cloud"],
+    "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "linux"],
     "valid_roles": [
         "devops", "cloud", "sre", "site reliability", "platform", 
         "infrastructure", "inżynier chmury", "system administrator", "sysadmin"
     ],
     "blacklisted_terms": [
         "junior", "trainee", "staż", "intern", "helpdesk", "support", 
-        "frontend", "react", "vue", "angular", "android", "ios", "qa", "tester", "php", ".net"
+        "frontend", "react", "vue", "angular", "android", "ios", "qa", "tester", "php"
     ],
-    "allowed_cities": ["warszawa", "warsaw"],
+    "allowed_cities": ["warszawa", "warsaw", "poland", "polska"],
     "excluded_companies": ["sii"]
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "pl,en-US;q=0.7,en;q=0.3"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache"
 }
 
 def load_seen_offers() -> Set[str]:
@@ -52,16 +53,15 @@ def save_seen_offers(seen_offers: Set[str]) -> None:
     with open(SEEN_OFFERS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_offers), f)
 
-# --- SKUTECZNE I ODPOWORNIONE KOLEKTORY ---
+# --- SKUTECZNE KOLEKTORY OFERT ---
 
 class JJITFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        # Zapytanie po wyszukiwaniu słów kluczowych devops/cloud
-        url = "https://api.justjoin.it/v2/user-panel/offers"
-        headers = {**HEADERS, "Version": "2"}
+        # Publiczny skonsolidowany endpoint wyszukiwania JustJoin.it
+        url = "https://api.justjoin.it/v2/user-panel/offers?category=devops&sortBy=published&sortOrder=desc&perPage=50"
         try:
-            r = requests.get(url, headers=headers, timeout=12)
+            r = requests.get(url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
                 data = r.json().get("data", [])
                 results = []
@@ -71,14 +71,16 @@ class JJITFetcher:
                     results.append({
                         "id": f"jjit_{item.get('id')}",
                         "title": title,
-                        "company": item.get('company_name', ''),
-                        "url": f"https://justjoin.it/offers/{item.get('id')}",
-                        "workplace": item.get('workplace_type', ''),
+                        "company": item.get('companyName', item.get('company_name', '')),
+                        "url": f"https://justjoin.it/offers/{item.get('slug', item.get('id'))}",
+                        "workplace": str(item.get('workplaceType', '')),
                         "city": item.get('city', ''),
                         "source": "JustJoin.it",
                         "skills": skills
                     })
                 return results
+            else:
+                logging.warning(f"JJIT zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"JJIT Error: {e}")
         return []
@@ -87,13 +89,13 @@ class NoFluffJobsFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
         url = "https://nofluffjobs.com/api/search/posting"
-        headers = {**HEADERS, "Content-Type": "application/json"}
         payload = {
-            "category": ["devops", "architecture"],
-            "criteriaSearch": {"city": ["warszawa"], "requirement": ["aws", "kubernetes", "terraform"]}
+            "category": ["devops"],
+            "rawSearch": "devops"
         }
+        headers = {**HEADERS, "Content-Type": "application/json"}
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=12)
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
             if r.status_code == 200:
                 postings = r.json().get("postings", [])
                 results = []
@@ -110,6 +112,8 @@ class NoFluffJobsFetcher:
                         "skills": tiles
                     })
                 return results
+            else:
+                logging.warning(f"NFJ zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"NFJ Error: {e}")
         return []
@@ -117,9 +121,9 @@ class NoFluffJobsFetcher:
 class BulldogjobFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=100"
+        url = "https://bulldogjob.pl/api/v1/jobs?page=1&perPage=50&keyword=devops"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=12)
+            r = requests.get(url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
                 jobs = r.json().get("data", [])
                 results = []
@@ -137,6 +141,8 @@ class BulldogjobFetcher:
                         "skills": env + skills
                     })
                 return results
+            else:
+                logging.warning(f"Bulldogjob zwrócił status: {r.status_code}")
         except Exception as e:
             logging.error(f"Bulldogjob Error: {e}")
         return []
@@ -144,13 +150,13 @@ class BulldogjobFetcher:
 class LinkedInFetcher:
     @staticmethod
     def fetch() -> List[Dict]:
-        url = "https://www.linkedin.com/jobs/search/?keywords=devops%20aws&location=Poland&f_WT=2&redirect=false"
+        url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=DevOps&location=Poland&start=0"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=12)
+            r = requests.get(url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
                 matches = re.findall(r'<a class="base-card__full-link[^"]*" href="([^"]+)".*?<span class="sr-only">\s*([^<]+)\s*</span>', r.text, re.DOTALL)
                 results = []
-                for url_match, title in matches[:20]:
+                for url_match, title in matches[:15]:
                     job_id_match = re.search(r'-(\d+)\?', url_match)
                     job_id = job_id_match.group(1) if job_id_match else str(hash(url_match))
                     results.append({
@@ -186,27 +192,21 @@ def is_matching(offer: Dict) -> bool:
     
     score = 0
     if has_valid_role:
-        score += 3
+        score += 2
         
     for tech in CRITERIA["core_tech"]:
         if tech in full_text:
-            score += 2
+            score += 1
 
     for tech in CRITERIA["supporting_tech"]:
         if tech in full_text:
             score += 1
 
-    if score < 4:
+    # Wystarczy obecność roli + 1 technologii lub samo dopasowanie słów kluczowych
+    if score < 2:
         return False
 
-    workplace = str(offer.get("workplace", "")).lower()
-    city = str(offer.get("city", "")).lower()
-
-    is_remote = "remote" in workplace or "remote" in city or "zdalna" in workplace
-    is_warsaw = any(c in city for c in CRITERIA["allowed_cities"])
-    is_hybrid = "hybrid" in workplace or "hybryda" in workplace
-
-    return is_remote or (is_hybrid and is_warsaw)
+    return True
 
 # --- WYSYŁANIE E-MAILA ---
 
@@ -225,7 +225,7 @@ def send_email_digest(matched_offers: List[Dict]) -> None:
         html_content += f"""
         <li style="margin-bottom: 12px;">
             <strong><a href="{o['url']}">{o['title']}</a></strong> w <b>{o['company']}</b><br/>
-            <span>Źródło: {o['source']} | Tryb: {o['workplace']} ({o['city']})</span>
+            <span>Źródło: <b>{o['source']}</b> | Tryb: {o['workplace']} ({o['city']})</span>
         </li>
         """
     html_content += "</ul>"
@@ -248,7 +248,7 @@ def main():
     all_offers = []
     
     sources = [
-        ("JJIT", JJITFetcher),
+        ("JustJoin.it", JJITFetcher),
         ("NoFluffJobs", NoFluffJobsFetcher),
         ("Bulldogjob", BulldogjobFetcher),
         ("LinkedIn", LinkedInFetcher),
