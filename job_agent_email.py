@@ -19,17 +19,25 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "twój_app_password")
 
 SEEN_OFFERS_FILE = "seen_offers.json"
 
-# POLUZOWANE KRYTERIA WYSZUKIWANIA
+# --- PROFIL: MID/SENIOR DEVOPS & CLOUD ENGINEER ---
 CRITERIA = {
-    "roles": [
-        "devops", "sre", "cloud", "site reliability", "platform", 
+    # Kluczowy stos technologiczny
+    "core_tech": ["aws", "terraform", "kubernetes", "k8s"],
+    "supporting_tech": ["github", "bitbucket", "docker", "ansible", "helm", "ci/cd", "python", "bash", "gcp", "azure"],
+    
+    # Dozwolone nazwy ról
+    "valid_roles": [
+        "devops", "cloud", "sre", "site reliability", "platform", 
         "infrastructure", "inżynier chmury", "system administrator", "sysadmin"
     ],
-    "keywords": [
-        "aws", "terraform", "kubernetes", "k8s", "docker", 
-        "cloud", "azure", "gcp", "ansible", "ci/cd"
+    
+    # Odsiew śmieciowych ofert i niepasujących poziomów
+    "blacklisted_terms": [
+        "junior", "trainee", "staż", "intern", "helpdesk", "support", 
+        "frontend", "react", "vue", "angular", "android", "ios", "qa", "tester", "php", ".net"
     ],
-    "allowed_cities": ["warszawa", "warsaw", "poland", "polska"],
+    
+    "allowed_cities": ["warszawa", "warsaw"],
     "excluded_companies": ["sii"]
 }
 
@@ -170,7 +178,7 @@ class LinkedInFetcher:
             logging.error(f"LinkedIn Error: {e}")
         return []
 
-# --- WALIDACJA OFERT ---
+# --- WERYFIKACJA I FILTRACJA OFERT ---
 
 def is_matching(offer: Dict) -> bool:
     company = str(offer.get("company", "")).lower()
@@ -179,27 +187,47 @@ def is_matching(offer: Dict) -> bool:
 
     title = str(offer.get("title", "")).lower()
     skills = " ".join(offer.get("skills", [])).lower()
-    searchable_text = f"{title} {skills}"
+    full_text = f"{title} {skills}"
 
-    # 1. Rola LUB kluczowe technologie w umiejętnościach
-    has_role = any(role in title for role in CRITERIA["roles"])
-    has_tech_in_skills = any(kw in skills for kw in ["aws", "terraform", "kubernetes", "k8s"])
-
-    if not (has_role or has_tech_in_skills):
+    # 1. Twardy odsiew - czarna lista (Junior, Support, Frontend itp.)
+    if any(black in full_text for black in CRITERIA["blacklisted_terms"]):
         return False
 
-    # 2. Słowa kluczowe w opisie/tytule
-    if not any(kw in searchable_text for kw in CRITERIA["keywords"]):
+    # 2. Sprawdzenie roli
+    has_valid_role = any(role in title for role in CRITERIA["valid_roles"])
+    
+    # 3. System punktacyjny
+    score = 0
+    if has_valid_role:
+        score += 3
+        
+    for tech in CRITERIA["core_tech"]:
+        if tech in full_text:
+            score += 2
+
+    for tech in CRITERIA["supporting_tech"]:
+        if tech in full_text:
+            score += 1
+
+    # Wymagany próg minimum 5 punktów
+    if score < 5:
         return False
 
-    # 3. Lokalizacja / Tryb (Remote, Warszawa lub Polska)
+    # 4. ŚCISŁA FILTRACJA LOKALIZACJI I TRYBU (Zdalnie LUB Hybryda w Warszawie)
     workplace = str(offer.get("workplace", "")).lower()
     city = str(offer.get("city", "")).lower()
 
     is_remote = "remote" in workplace or "remote" in city or "zdalna" in workplace
-    is_allowed_location = any(c in city for c in CRITERIA["allowed_cities"]) or city == ""
+    is_warsaw = any(c in city for c in CRITERIA["allowed_cities"])
+    is_hybrid = "hybrid" in workplace or "hybryda" in workplace
 
-    return is_remote or is_allowed_location
+    # Zaznaczamy wyłącznie: Praca zdalna LUB Hybryda w Warszawie
+    if is_remote:
+        return True
+    elif is_hybrid and is_warsaw:
+        return True
+    
+    return False
 
 # --- WYSYŁANIE WIADOMOŚCI E-MAIL ---
 
@@ -240,7 +268,6 @@ def main():
     seen_offers = load_seen_offers()
     all_offers = []
     
-    # Pobieranie ze sprawdzonych i stabilnych źródeł
     all_offers.extend(JJITFetcher.fetch())
     all_offers.extend(NoFluffJobsFetcher.fetch())
     all_offers.extend(RemotiveFetcher.fetch())
